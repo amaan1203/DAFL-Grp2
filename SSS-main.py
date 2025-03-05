@@ -8,7 +8,6 @@ from decimal import Decimal
 # Constants
 FIELD_SIZE = 10 ** 5  # Field size for secret sharing
 
-
 def measure_execution_time(func):
     """Decorator to measure execution time of a function."""
 
@@ -22,20 +21,19 @@ def measure_execution_time(func):
     return wrapper
 
 
-def polynom(x, coefficients):
+def polynom(x: int, coefficients: List[int]) -> int:
     """
     This generates a single point on the graph of given polynomial
     in x. The polynomial is given by the list of coefficients.
     """
     point = 0
-    # Loop through reversed list, so that indices from enumerate match the
-    # actual coefficient indices
     for coefficient_index, coefficient_value in enumerate(coefficients[::-1]):
+        # print("coefficient_index:", coefficient_index, "coefficient_value:", coefficient_value)
         point += x ** coefficient_index * coefficient_value
     return point
 
 
-def coeff(t, secret):
+def coeff(t : int, secret : int) -> List[int]:
     """
     Randomly generate a list of coefficients for a polynomial with
     degree of t - 1, whose constant is secret.
@@ -45,7 +43,7 @@ def coeff(t, secret):
     return coeff
 
 
-def generate_shares(n, m, secret):
+def generate_shares(n : int, m : int, secret : int) -> List[Tuple[int, int]]:
     """
     Split given secret into n shares with minimum threshold
     of m shares to recover this secret, using SSS algorithm.
@@ -60,7 +58,7 @@ def generate_shares(n, m, secret):
     return shares
 
 
-def reconstruct_secret(shares):
+def reconstruct_secret(shares : List[Tuple[int, int]]) -> int:
     """
     Combines individual shares (points on graph)
     using Lagrange's interpolation.
@@ -82,7 +80,7 @@ def reconstruct_secret(shares):
 
         prod *= yj
         sums += Decimal(prod)
-
+    print(sums)
     return int(round(Decimal(sums), 0))
 
 
