@@ -2,34 +2,25 @@ import numpy as np
 import random
 import time
 from typing import List, Dict, Tuple
-from math import ceil
 from decimal import Decimal
+from math import ceil
 
-# Constants
+
 FIELD_SIZE = 10 ** 5  # Field size for secret sharing
-
-
-def measure_execution_time(func):
-    """Decorator to measure execution time of a function."""
-
-    def wrapper(*args, **kwargs):
-        start_time = time.time()
-        result = func(*args, **kwargs)
-        end_time = time.time()
-        print(f"Execution time: {end_time - start_time:.4f} seconds")
-        return result
-
-    return wrapper
 
 
 def polynom(x, coefficients):
     """
-    This generates a single point on the graph of given polynomial
-    in x. The polynomial is given by the list of coefficients.
+    Generate a single point on the graph of a given polynomial.
+
+    Args:
+        x (int): The x-coordinate
+        coefficients (List[int]): Coefficients of the polynomial
+
+    Returns:
+        int: The y-coordinate for the given x
     """
     point = 0
-    # Loop through reversed list, so that indices from enumerate match the
-    # actual coefficient indices
     for coefficient_index, coefficient_value in enumerate(coefficients[::-1]):
         point += x ** coefficient_index * coefficient_value
     return point
@@ -37,18 +28,31 @@ def polynom(x, coefficients):
 
 def coeff(t, secret):
     """
-    Randomly generate a list of coefficients for a polynomial with
-    degree of t - 1, whose constant is secret.
+    Randomly generate coefficients for a polynomial.
+
+    Args:
+        t (int): Threshold for reconstruction
+        secret (int): Secret value to be shared
+
+    Returns:
+        List[int]: Coefficients of the polynomial
     """
-    coeff = [random.randrange(0, FIELD_SIZE) for _ in range(t - 1)]
-    coeff.append(secret)
-    return coeff
+    coefficients = [random.randrange(0, FIELD_SIZE) for _ in range(t - 1)]
+    coefficients.append(secret)
+    return coefficients
 
 
 def generate_shares(n, m, secret):
     """
-    Split given secret into n shares with minimum threshold
-    of m shares to recover this secret, using SSS algorithm.
+    Split a secret into n shares with a minimum threshold of m shares.
+
+    Args:
+        n (int): Total number of shares
+        m (int): Minimum shares required for reconstruction
+        secret (int): Secret to be shared
+
+    Returns:
+        List[Tuple[int, int]]: Generated shares
     """
     coefficients = coeff(m, secret)
     shares = []
@@ -62,15 +66,15 @@ def generate_shares(n, m, secret):
 
 def reconstruct_secret(shares):
     """
-    Combines individual shares (points on graph)
-    using Lagrange's interpolation.
+    Reconstruct secret using Lagrange interpolation.
 
-    shares is a list of points (x, y) belonging to a
-    polynomial with a constant of our key.
+    Args:
+        shares (List[Tuple[int, int]]): Shares to reconstruct secret
+
+    Returns:
+        int: Reconstructed secret
     """
     sums = 0
-    prod_arr = []
-
     for j, share_j in enumerate(shares):
         xj, yj = share_j
         prod = Decimal(1)
@@ -86,235 +90,317 @@ def reconstruct_secret(shares):
     return int(round(Decimal(sums), 0))
 
 
+class Buffer:
+    def __init__(self, buffer_id: int, threshold: int):
+        """
+        Initialize a buffer for secret sharing.
+
+        Args:
+            buffer_id (int): Unique identifier for the buffer
+            threshold (int): Minimum shares required for reconstruction
+        """
+        self.buffer_id = buffer_id
+        self.threshold = threshold
+        self.shares = {}  # Shares from different senders
+        self.total_shares_count = 0
+        self.layer_shapes = {"model_layer": (2, 2)}
+        self.position_values = {}  # Store shares by position for reconstruction
+
+    def add_share(self, sender_id: int, position_index: str, share_data: Dict):
+        """
+        Add a share to the buffer.
+
+        Args:
+            sender_id (int): ID of the sending client
+            position_index (str): Position index of the share
+            share_data (Dict): Share data
+        """
+        if position_index not in self.position_values:
+            self.position_values[position_index] = []
+
+        self.position_values[position_index].append({
+            'sender_id': sender_id,
+            'share': share_data['share'],
+            'owner_id': share_data['owner_id']
+        })
+
+        self.total_shares_count += 1
+
+    def is_ready_for_reconstruction(self):
+        """
+        Check if buffer has received enough shares for reconstruction.
+
+        Returns:
+            bool: True if ready for reconstruction, False otherwise
+        """
+        # Check if we have at least threshold number of shares for any position
+        for position, shares in self.position_values.items():
+            if len(shares) >= self.threshold:
+                return True
+        return False
+
+    def reconstruct_update(self):
+        """
+        Reconstruct model update using all available shares.
+
+        Returns:
+            Dict or None: Reconstructed model update
+        """
+        reconstructed_values = {}
+
+        # Group shares by owner_id
+        shares_by_owner = {}
+
+        for position, shares_list in self.position_values.items():
+            for share_info in shares_list:
+                owner_id = share_info['owner_id']
+
+                if owner_id not in shares_by_owner:
+                    shares_by_owner[owner_id] = {}
+
+                if position not in shares_by_owner[owner_id]:
+                    shares_by_owner[owner_id][position] = []
+
+                shares_by_owner[owner_id][position].append(share_info['share'])
+
+        # Reconstruct values for each owner
+        for owner_id, positions in shares_by_owner.items():
+            reconstructed_values[owner_id] = {}
+
+            for position, shares in positions.items():
+                if len(shares) >= self.threshold:
+                    try:
+                        reconstructed_value = reconstruct_secret(shares)
+                        reconstructed_values[owner_id][position] = reconstructed_value / 1000  # Scale back down
+                    except Exception as e:
+                        print(f"Error reconstructing value for owner {owner_id} at position {position}: {e}")
+
+        # Convert to numpy arrays
+        final_reconstructions = {}
+        for owner_id, positions in reconstructed_values.items():
+            # Create empty array with the model shape
+            shape = self.layer_shapes["model_layer"]
+            model = np.zeros(shape)
+
+            # Fill in the values
+            for position, value in positions.items():
+                row, col = map(int, position.split('_'))
+                model[row, col] = value
+
+            final_reconstructions[owner_id] = model
+
+        return final_reconstructions
+
+
 class Client:
-    def _init_(self, client_id: int, num_clients: int):
+    def __init__(self, client_id: int, num_clients: int, buffer_id: int):
+        """
+        Initialize a client in the secret sharing system.
+
+        Args:
+            client_id (int): Unique identifier for the client
+            num_clients (int): Total number of clients
+            buffer_id (int): ID of the buffer mapped to this client
+        """
         self.client_id = client_id
         self.num_clients = num_clients
+        self.buffer_id = buffer_id
         self.model_update = None
-        self.my_shares = {}  # {recipient_id: {layer_name: {value_index: {owner_id, shares}}}}
-        self.received_shares = {}  # {sender_id: {layer_name: {value_index: {owner_id, shares}}}}
+        # Initialize my_shares as a list of empty dictionaries for each client
+        self.my_shares = [{} for _ in range(num_clients)]
+        self.received_shares = {}  # Initialize as a dictionary instead of a list
+        self.model_dimensions = None
 
     def generate_model_update(self):
         """Generate a mock model update with fixed values."""
-        self.model_update = {
-            "layer1": np.array([[1.0, 2.0], [3.0, 4.0]]) * (self.client_id + 1),
-            "layer2": np.array([5.0, 6.0, 7.0]) * (self.client_id + 1)
-        }
+        self.model_update = np.array([[100.0, 200.0] , [300.0 , 400.0]]) * (self.client_id + 1)
+        self.model_dimensions = self.model_update.shape
+
         print(f"Client {self.client_id} generated model update:")
-        for layer_name, values in self.model_update.items():
-            print(f"{layer_name}:\n{values}")
-        print()
+        print(f" printing model updates for client {self.client_id} -> {self.model_update}")
 
     def create_shares(self, threshold: int):
-        """Create shares of the model update using the SSS algorithm."""
-        # Initialize share structure
-        for recipient_id in range(self.num_clients):
-            self.my_shares[recipient_id] = {}
+        """
+        Create shares of the model update.
 
-        # Process each layer of the model update
-        for layer_name, layer_values in self.model_update.items():
-            flat_values = layer_values.flatten()
+        Args:
+            threshold (int): Minimum shares required for reconstruction
 
-            # Initialize layer structure for each recipient
-            for recipient_id in range(self.num_clients):
-                self.my_shares[recipient_id][layer_name] = {}
-
-            # Create shares for each value
-            for i, value in enumerate(flat_values):
-                # Convert float to int for SSS
+        Returns:
+            List[Dict]: Shares to be distributed
+        """
+        # Loop through the 2D array properly
+        for row_idx in range(self.model_update.shape[0]):
+            for col_idx in range(self.model_update.shape[1]):
+                value = self.model_update[row_idx, col_idx]
                 int_value = int(value * 1000)  # Scale up to preserve precision
-
-                # Create shares
                 shares = generate_shares(self.num_clients, threshold, int_value)
+                print(
+                    f"printing shares generated by client {self.client_id} for value {value} at position ({row_idx},{col_idx}) -> {shares}")
 
-                # Distribute shares to recipients
+                # Create a unique index for the value based on its position
+                position_index = f"{row_idx}_{col_idx}"
+
                 for recipient_id in range(self.num_clients):
-                    self.my_shares[recipient_id][layer_name][i] = {
+                    # Initialize this position if it doesn't exist
+                    if position_index not in self.my_shares[recipient_id]:
+                        self.my_shares[recipient_id][position_index] = {}
+
+                    # Store the share with position information
+                    self.my_shares[recipient_id][position_index] = {
                         'owner_id': self.client_id,
-                        'share': shares[recipient_id]
+                        'share': shares[recipient_id],
+                        'row': row_idx,
+                        'column': col_idx,
+
                     }
 
+        print(f"Shares have been generated for client {self.client_id} and stored in my_shares array")
+        print(f"printing my_shares array of this client {self.client_id}: {self.my_shares}")
+
+        print(f"adding in received shares for client {self.client_id}")
+
+        #Add a copy of the values to the received_shares dictionary for this client
+        # so they have their own shares as well
+        self.received_shares[self.client_id] = {}
+
+        # For each row and column in the model
+        for row_idx in range(self.model_update.shape[0]):
+            for col_idx in range(self.model_update.shape[1]):
+                position_index = f"{row_idx}_{col_idx}"
+
+                # Add the share for this position from my_shares to received_shares
+                if position_index in self.my_shares[self.client_id]:
+                    self.received_shares[self.client_id][position_index] = self.my_shares[self.client_id][
+                        position_index]
+
+        return self.my_shares
+
     def distribute_shares(self, clients: List['Client']):
-        """Distribute shares to other clients."""
-        for recipient_id, shares in self.my_shares.items():
-            if recipient_id != self.client_id:
-                # Send to other client
-                clients[recipient_id].receive_shares(self.client_id, shares)
-            else:
-                # Keep own shares
-                self.received_shares[self.client_id] = shares
+        """
+        Distribute shares to other clients and include own share.
 
-    def receive_shares(self, sender_id: int, shares: Dict):
-        """Receive shares from another client."""
-        self.received_shares[sender_id] = shares
+        Args:
+            clients (List[Client]): List of all clients
+        """
+        # For each recipient client
+        for recipient_id in range(self.num_clients):
+            # Skip self (we already have our own shares)
+            if recipient_id == self.client_id:
+                continue
 
-    def forward_to_buffer(self, buffer: 'Buffer'):
-        """Forward received shares to the buffer."""
-        for sender_id, shares in self.received_shares.items():
-            buffer.receive_shares(sender_id, shares)
+            # Get the recipient client object
+            recipient_client = clients[recipient_id]
 
+            # Check if recipient already has shares from this client
+            if self.client_id not in recipient_client.received_shares:
+                # Initialize the entry for this client in recipient's received_shares
+                recipient_client.received_shares[self.client_id] = {}
 
-class Buffer:
-    def _init_(self, buffer_id: int, threshold: int):
-        self.buffer_id = buffer_id
-        self.threshold = threshold
-        # Reorganized share structure
-        self.shares = {}  # {owner_id: {sender_id: {layer_name: {value_index: share}}}}
-        self.layer_shapes = {
-            "layer1": (2, 2),
-            "layer2": (3,)
-        }
+                # Copy all shares meant for this recipient
+                for position_index, share_data in self.my_shares[recipient_id].items():
+                    recipient_client.received_shares[self.client_id][position_index] = share_data
 
-    def receive_shares(self, sender_id: int, shares: Dict):
-        """Receive shares from a client with owner metadata."""
-        for layer_name, layer_shares in shares.items():
-            for value_index, share_data in layer_shares.items():
+    def forward_to_buffer(self, buffers: List['Buffer'], threshold: int):
+        """
+        Forward received shares to the correct buffer based on owner_id.
+
+        Args:
+            buffers (List[Buffer]): List of all buffers
+            threshold (int): Minimum shares required for reconstruction
+        """
+        # Iterate through all clients in received_shares
+        for sender_id, positions in self.received_shares.items():
+            # Iterate through all position indices for this sender
+            for position_index, share_data in positions.items():
+                # Get the owner_id of this share
                 owner_id = share_data['owner_id']
-                share = share_data['share']
 
-                # Ensure structure is initialized
-                if owner_id not in self.shares:
-                    self.shares[owner_id] = {}
-                if sender_id not in self.shares[owner_id]:
-                    self.shares[owner_id][sender_id] = {}
-                if layer_name not in self.shares[owner_id][sender_id]:
-                    self.shares[owner_id][sender_id][layer_name] = {}
+                # Forward to the buffer with matching owner_id
+                target_buffer = buffers[owner_id]
 
-                # Store the share
-                self.shares[owner_id][sender_id][layer_name][value_index] = share
-
-    def reconstruct_update(self, client_id: int, share_ids: List[int]):
-        """Reconstruct a client's model update using shares from specified clients."""
-        if client_id not in self.shares:
-            print(f"Buffer {self.buffer_id}: No shares received for client {client_id}")
-            return None
-
-        if len(share_ids) < self.threshold:
-            print(f"Buffer {self.buffer_id}: Not enough share IDs ({len(share_ids)})")
-            return None
-
-        # Check if all requested share IDs are available for this client
-        for share_id in share_ids:
-            if share_id not in self.shares[client_id]:
-                print(f"Buffer {self.buffer_id}: Missing shares from client {share_id} for client {client_id}'s update")
-                return None
-
-        # Get layer names from the first share source
-        first_sender = share_ids[0]
-        layer_names = list(self.shares[client_id][first_sender].keys())
-
-        reconstructed_update = {}
-
-        # Process each layer
-        for layer_name in layer_names:
-            shape = self.layer_shapes[layer_name]
-            flat_size = np.prod(shape)
-            reconstructed_flat = np.zeros(flat_size)
-
-            # Get indices from the first sender
-            value_indices = list(self.shares[client_id][first_sender][layer_name].keys())
-
-            # Reconstruct each value
-            for i in value_indices:
-                # Collect shares for this value from specified clients
-                value_shares = []
-                for sender_id in share_ids:
-                    if (layer_name in self.shares[client_id][sender_id] and
-                            i in self.shares[client_id][sender_id][layer_name]):
-                        value_shares.append(self.shares[client_id][sender_id][layer_name][i])
-
-                # Reconstruct the value
-                try:
-                    if len(value_shares) >= self.threshold:
-                        reconstructed_value = reconstruct_secret(value_shares)
-                        reconstructed_flat[int(i)] = reconstructed_value / 1000  # Reverse scaling
-                    else:
-                        print(
-                            f"Not enough shares for value at index {i}: got {len(value_shares)}, need {self.threshold}")
-                        reconstructed_flat[int(i)] = 0
-                except Exception as e:
-                    print(f"Error reconstructing value at index {i}: {e}")
-                    reconstructed_flat[int(i)] = 0  # Set to default on error
-
-            # Reshape to original dimensions
-            reconstructed_update[layer_name] = reconstructed_flat.reshape(shape)
-
-        return reconstructed_update
+                # Add the share to the buffer
+                target_buffer.add_share(sender_id, position_index, share_data)
 
 
 class SimulationSystem:
-    def _init_(self, num_clients: int, threshold: int):
+    def __init__(self, num_clients: int, threshold: int):
+        """
+        Initialize the secret sharing simulation system.
+
+        Args:
+            num_clients (int): Total number of clients
+            threshold (int): Minimum shares required for reconstruction
+        """
         self.num_clients = num_clients
         self.threshold = threshold
-        self.clients = [Client(i, num_clients) for i in range(num_clients)]
-        self.buffers = [Buffer(i, threshold) for i in range(num_clients)]
 
-    @measure_execution_time
+        self.buffers = [Buffer(i, threshold) for i in range(num_clients)]
+        self.clients = [Client(i, num_clients, i) for i in range(num_clients)]
+
     def setup(self):
-        """Set up the simulation."""
+        """Set up the simulation by generating and distributing shares."""
         print("Generating model updates...")
         for client in self.clients:
             client.generate_model_update()
 
-        print("Creating shares...")
+        print("\nCreating shares...")
         for client in self.clients:
             client.create_shares(self.threshold)
 
-        print("Distributing shares between clients...")
+        print("\nDistributing shares between clients...")
         for client in self.clients:
             client.distribute_shares(self.clients)
 
-        print("Forwarding shares to buffers...")
-        for i, client in enumerate(self.clients):
-            client.forward_to_buffer(self.buffers[i])
+        print(f"\nNow printing the received shares of all the clients")
+        for client in self.clients:
+            sender_count = len(client.received_shares)
+            print(f"Client {client.client_id} received shares from {sender_count} clients")
 
-    @measure_execution_time
+        print("\nForwarding shares to buffers...")
+        # Forward shares from all clients to buffers
+        selected_clients = random.sample(self.clients, self.threshold)
+        for client in selected_clients:
+            print(f"Client {client.client_id} forwarding shares to buffers")
+            client.forward_to_buffer(self.buffers, self.threshold)
+
+        print("\nBuffer contents after forwarding:")
+        for buffer in self.buffers:
+            position_count = len(buffer.position_values)
+            total_shares = buffer.total_shares_count
+            print(f"Buffer {buffer.buffer_id}: {position_count} positions, {total_shares} total shares")
+
     def reconstruct_updates(self):
-        """Simulate reconstruction of model updates."""
-        for client_id in range(self.num_clients):
-            print(f"\n{'=' * 50}")
-            print(f"Reconstructing model update for client {client_id}")
-            print(f"{'=' * 50}")
+        """Reconstruct model updates from the buffers."""
+        print("\nReconstructing model updates...")
+        for buffer in self.buffers:
+            if buffer.is_ready_for_reconstruction():
+                print(f"\nReconstructing update for buffer {buffer.buffer_id} (owner {buffer.buffer_id})...")
+                reconstructed = buffer.reconstruct_update()
+                if reconstructed:
+                    for owner_id, model in reconstructed.items():
+                        print(f"Reconstructed model for owner {owner_id}:")
+                        print(model)
 
-            # Choose threshold number of random clients to use their shares
-            share_ids = random.sample(range(self.num_clients), self.threshold)
-            print(f"Using shares from clients: {share_ids}")
+                        # Compare with original model for verification
+                        original_model = self.clients[owner_id].model_update
+                        print(f"Original model for owner {owner_id}:")
+                        print(original_model)
 
-            # Try reconstruction in each buffer
-            for buffer_id in range(self.num_clients):
-                buffer = self.buffers[buffer_id]
-
-                print(f"\nBuffer {buffer_id} attempting reconstruction:")
-                reconstructed_update = buffer.reconstruct_update(client_id, share_ids)
-
-                if reconstructed_update:
-                    print("Reconstructed model update:")
-                    for layer_name, values in reconstructed_update.items():
-                        print(f"{layer_name}:\n{values}")
-
-                    # Compare with original
-                    print("\nOriginal model update:")
-                    for layer_name, values in self.clients[client_id].model_update.items():
-                        print(f"{layer_name}:\n{values}")
-
-                    # Calculate error
-                    print("\nReconstruction error:")
-                    for layer_name in reconstructed_update:
-                        original = self.clients[client_id].model_update[layer_name]
-                        reconstructed = reconstructed_update[layer_name]
-                        error = np.abs(original - reconstructed).mean()
-                        print(f"{layer_name}: {error:.6f}")
-                else:
-                    print("Reconstruction failed.")
+                        # Check if reconstruction was accurate
+                        is_close = np.allclose(model, original_model)
+                        print(f"Reconstruction successful: {is_close}")
+            else:
+                print(f"\nBuffer {buffer.buffer_id} not ready for reconstruction")
 
 
-@measure_execution_time
 def main():
+    """Main function to run the secret sharing simulation."""
     # Set random seed for reproducibility
     random.seed(42)
 
     # Parameters
-    num_clients = 5
+    num_clients = 6
     threshold = 3
 
     # Run simulation
@@ -328,27 +414,5 @@ def main():
     system.reconstruct_updates()
 
 
-# Simple demonstration of the SSS algorithm
-def demo_sss():
-    # (3,5) sharing scheme
-    t, n = 3, 5
-    secret = 1234
-    print(f'Original Secret: {secret}')
-
-    # Phase I: Generation of shares
-    shares = generate_shares(n, t, secret)
-    print(f'Shares: {", ".join(str(share) for share in shares)}')
-
-    # Phase II: Secret Reconstruction
-    # Picking t shares randomly for reconstruction
-    pool = random.sample(shares, t)
-    print(f'Combining shares: {", ".join(str(share) for share in pool)}')
-    print(f'Reconstructed secret: {reconstruct_secret(pool)}')
-
-
-if __name__ == "_main_":
-    # Uncomment to run the SSS demo
-    demo_sss()
-
-    # Run the federated learning simulation
+if __name__ == "__main__":
     main()
