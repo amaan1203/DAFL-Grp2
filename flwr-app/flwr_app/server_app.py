@@ -3,6 +3,7 @@ from flwr.common import Context, ndarrays_to_parameters, FitRes, FitIns
 from flwr.server import ServerApp, ServerAppComponents, ServerConfig
 from flwr.server.strategy import FedAvg
 from numpy.matlib import empty
+from sympy.codegen.cnodes import sizeof
 
 from flwr_app.task import Net, get_weights
 import numpy as np
@@ -302,25 +303,31 @@ def server_fn(context: Context):
                     print("\nReconstructed updates: hehe ")
                     print(f"Using {len(reconstructed_updates)} reconstructed updates for aggregation")
                     secure_results = []
-                    # iske aage flow hi nahi jaa rha haiiiiii
 
-                    print(f"printing results  {results}" )
+                    # print(f"printing results  {results[0]}" )
                     print(f"printing failures  {failures}" )
                     print("ab saala results ke andar enumerate kyu nahi ho rha !! ")
+                    # After reconstructing updates
+                    print(f"reconstructed_updates keys: {list(reconstructed_updates.keys())}")
+                    print(f"client IDs in results: are {[int(client_proxy.cid) for client_proxy, _ in results]}")
+                    print("---------------------------------------------")
                     for client_idx, (client_proxy, fit_res) in enumerate(results):
+                        # print(f"Processing result from client {client_idx}")
                         client_id = int(client_proxy.cid)
-                        if client_id in reconstructed_updates:
-                            print(f"flow reached here for  {client_id} ")
+                        print(f"client_id is {client_id}")
+                        # print("reconstructed_updates : --------- ", reconstructed_updates)
+                        if client_idx in reconstructed_updates:
+                            print(f" bkl flow reached here for  {client_idx} ")
                             new_fit_res = FitRes(
-                                parameters=ndarrays_to_parameters(reconstructed_updates[client_id]),
+                                parameters=ndarrays_to_parameters(reconstructed_updates[client_idx]),
                                 num_examples=fit_res.num_examples,
                                 metrics=fit_res.metrics,
                                 status=fit_res.status
                             )
-                            print(f"new_fit_res is also returned for client {client_id}")
+                            print(f"new_fit_res is also returned for client {client_idx}")
                             secure_results.append((client_proxy, new_fit_res))
                             print(f"Reconstructed update for client {client_id}:")
-                            for i, layer in enumerate(reconstructed_updates[client_id]):
+                            for i, layer in enumerate(reconstructed_updates[client_idx]):
                                 print(f" Layer {i} shape: {layer.shape}, mean: {np.mean(layer):.6f}")
 
                     if secure_results:
